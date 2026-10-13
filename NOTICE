@@ -1,36 +1,10 @@
 朝霞预报 DawnGlow
-Copyright (C) 2026  CN0721
-
-本程序是自由软件：你可以依据自由软件基金会发布的 GNU Affero 通用公共许可证
-（版本 3 或你选择的任何更新版本）的条款重新分发和/或修改它。
-
-本程序分发时希望它有用，但不提供任何担保；甚至没有适销性或特定用途适用性的
-默示担保。详情请见 GNU Affero 通用公共许可证。完整许可证文本见本目录 LICENSE 文件。
+Copyright (c) 2026 CN0721
+MIT License —— 完整条款见本目录 LICENSE 文件。
 
 --------------------------------------------------------------------
 
-本作品是以下项目的衍生作品（derivative work）：
-
-  Folia (Rust)
-  Copyright (C) 2026  Folia Rust port contributors
-  Licensed under the GNU Affero General Public License v3.0
-
-本项目的安卓 / Rust 工程脚手架（NativeActivity 入口、JNI 胶水、交叉编译脚本、
-`.cargo` 交叉编译配置、图标生成工具）衍生自 Folia (Rust)；业务代码（数据层、评分、
-界面、地图、桌面小组件、字体管理）为针对「朝霞 / 晚霞预报」重新实现。
-
-Folia (Rust) 本身又是以下项目的衍生作品：
-
-  Folia  (folia-major)
-  https://github.com/chthollyphile/folia-major
-  Copyright (C) chthollyphile and contributors
-  Licensed under the GNU Affero General Public License v3.0
-
-原项目的名称、设计理念与相关权利归原作者所有。
-
---------------------------------------------------------------------
-
-第三方数据与资源的版权与 attribution：
+第三方数据与资源的版权与署名（attribution）：
 
   - 气象数据：Open-Meteo（https://open-meteo.com），数据来源 NCEP GFS、
     ECMWF IFS、CAMS；遵循 CC BY 4.0，使用需署名。

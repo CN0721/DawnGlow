@@ -2,7 +2,7 @@
 name = "dawnglow"
 version = "0.1.0"
 edition = "2021"
-license = "AGPL-3.0-or-later"
+license = "MIT"
 description = "朝霞预报 DawnGlow — 基于 GFS / ECMWF / CAMS 的日出日落火烧云预报，纯 Rust 安卓应用。"
 repository = "https://github.com/CN0721/DawnGlow"
 authors = ["DawnGlow"]

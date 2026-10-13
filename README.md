@@ -4,7 +4,7 @@
 日出日落**火烧云（朝霞 / 晚霞）预报**安卓应用，纯 **Rust** + `egui`/`glow` 编写，
 无 Java / Kotlin 业务代码（仅桌面小组件用少量 Java），单文件原生 Activity。
 
-> 本仓库遵循 **AGPL-3.0** 开源，是 Folia (Rust) 的衍生作品，详见 [LICENSE](LICENSE) 与 [NOTICE](NOTICE)。
+> 本仓库以 **MIT** 协议开源，详见 [LICENSE](LICENSE)；第三方数据与字体的署名见 [NOTICE](NOTICE)。
 
 ## 功能
 
