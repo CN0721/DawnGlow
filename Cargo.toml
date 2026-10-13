@@ -1,0 +1,50 @@
+[package]
+name = "dawnglow"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+description = "朝霞预报 DawnGlow — 基于 GFS / ECMWF / CAMS 的日出日落火烧云预报，纯 Rust 安卓应用。"
+repository = "https://github.com/CN0721/DawnGlow"
+authors = ["DawnGlow"]
+
+[lib]
+name = "dawnglow"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "dawnglow-desktop"
+path = "src/main.rs"
+
+[dependencies]
+eframe = { version = "0.32", default-features = false, features = [
+    "glow",
+    "default_fonts",
+    "android-native-activity",
+    "x11",
+    "wayland",
+] }
+egui = "0.32"
+log = "0.4"
+env_logger = "0.11"
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ttf-parser = "0.25"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# HTTPS（ureq 2 的 tls 特性 = rustls + ring + webpki-roots），用于 Open-Meteo / OSM 瓦片。
+ureq = { version = "2", default-features = false, features = ["tls", "json"] }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+android-activity = { version = "0.6", features = ["native-activity"] }
+android_logger = "0.14"
+jni = "0.21"
+
+[profile.release]
+opt-level = "z"
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[profile.dev]
+opt-level = 1

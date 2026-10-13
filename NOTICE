@@ -1,0 +1,43 @@
+朝霞预报 DawnGlow
+Copyright (C) 2026  CN0721
+
+本程序是自由软件：你可以依据自由软件基金会发布的 GNU Affero 通用公共许可证
+（版本 3 或你选择的任何更新版本）的条款重新分发和/或修改它。
+
+本程序分发时希望它有用，但不提供任何担保；甚至没有适销性或特定用途适用性的
+默示担保。详情请见 GNU Affero 通用公共许可证。完整许可证文本见本目录 LICENSE 文件。
+
+--------------------------------------------------------------------
+
+本作品是以下项目的衍生作品（derivative work）：
+
+  Folia (Rust)
+  Copyright (C) 2026  Folia Rust port contributors
+  Licensed under the GNU Affero General Public License v3.0
+
+本项目的安卓 / Rust 工程脚手架（NativeActivity 入口、JNI 胶水、交叉编译脚本、
+`.cargo` 交叉编译配置、图标生成工具）衍生自 Folia (Rust)；业务代码（数据层、评分、
+界面、地图、桌面小组件、字体管理）为针对「朝霞 / 晚霞预报」重新实现。
+
+Folia (Rust) 本身又是以下项目的衍生作品：
+
+  Folia  (folia-major)
+  https://github.com/chthollyphile/folia-major
+  Copyright (C) chthollyphile and contributors
+  Licensed under the GNU Affero General Public License v3.0
+
+原项目的名称、设计理念与相关权利归原作者所有。
+
+--------------------------------------------------------------------
+
+第三方数据与资源的版权与 attribution：
+
+  - 气象数据：Open-Meteo（https://open-meteo.com），数据来源 NCEP GFS、
+    ECMWF IFS、CAMS；遵循 CC BY 4.0，使用需署名。
+  - 地图：© OpenStreetMap contributors（ODbL）、© CARTO。
+  - 「高德地图」图源使用非官方公开瓦片接口（GCJ-02 坐标系），仅供个人学习与
+    技术研究；相关影像版权归高德软件有限公司所有，请勿用于生产环境。
+  - 字体：本项目**不内置任何字体文件**。字体选择页提供的下载链接指向各厂商
+    官方分发或开源字体（如思源黑体 / 思源宋体 / 霞鹜文楷 / 得意黑 / 抖音美好体
+    等，各自遵循其授权协议），字体版权归各权利方所有，使用时请遵守对应授权。
+  - 应用图标为项目自制。

@@ -1,0 +1,19 @@
+# 工作区位于 Android sdcardfs（noexec），构建产物必须放在可执行的 rootfs 上。
+[build]
+target-dir = "/root/dawnglow-target"
+
+# ring / 其它 C 依赖的交叉编译器（Alpine clang 包装脚本，带上 NDK target 与 sysroot）。
+[env]
+CC_aarch64-linux-android = "clang-android"
+AR_aarch64-linux-android = "llvm-ar"
+
+# 宿主 clang 交叉链接到 NDK sysroot（x86_64 版 NDK clang 在 aarch64 宿主上跑不了）。
+[target.aarch64-linux-android]
+linker = "clang"
+rustflags = [
+    "-Clink-arg=--target=aarch64-linux-android26",
+    "-Clink-arg=-fuse-ld=lld",
+    "-Clink-arg=--sysroot=/root/android/ndk/toolchains/llvm/prebuilt/linux-x86_64/sysroot",
+    "-Clink-arg=-L/root/android/ndk/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/26",
+    "-Clink-arg=-L/root/android/ndk/toolchains/llvm/prebuilt/linux-x86_64/lib/clang/18/lib/linux/aarch64",
+]
