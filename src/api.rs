@@ -113,7 +113,7 @@ pub fn fetch_bundle(loc: &Location, mode: ModelMode) -> Result<ForecastBundle, S
 fn forecast_url(lat: f64, lon: f64, models: &[&str]) -> String {
     format!(
         "https://api.open-meteo.com/v1/forecast?latitude={lat:.4}&longitude={lon:.4}\
-&hourly=cloud_cover_low,cloud_cover_mid,cloud_cover_high,cloud_cover,visibility,relative_humidity_2m,precipitation_probability,direct_radiation,sunshine_duration\
+&hourly=cloud_cover_low,cloud_cover_mid,cloud_cover_high,cloud_cover,visibility,relative_humidity_2m,precipitation_probability\
 &daily=sunrise,sunset,precipitation_probability_mean\
 &models={}\
 &timezone=auto&forecast_days={FORECAST_DAYS}",
@@ -234,8 +234,6 @@ struct Series<'a> {
     high: &'a [Option<f32>],
     total: &'a [Option<f32>],
     visibility: &'a [Option<f32>],
-    /// 日照时长（秒/小时）
-    sunshine: &'a [Option<f32>],
     humidity: &'a [Option<f32>],
     rain: &'a [Option<f32>],
 }
@@ -285,7 +283,6 @@ fn inputs_at(s: &Series, idx: usize, frac: f32, aod: Option<f32>) -> Inputs {
         visibility_km: at_event(s.visibility, idx, frac).map(|m| m / 1000.0),
         aod,
         rain_prob: at_event(s.rain, idx, frac),
-        sunshine_frac: at_event(s.sunshine, idx, frac).map(|s| s / 3600.0),
     }
 }
 
@@ -315,14 +312,12 @@ fn model_score(
     let total = merged(hourly, "cloud_cover", n, &[model]);
     let humidity = merged(hourly, "relative_humidity_2m", n, &[model]);
     let rain = merged(hourly, "precipitation_probability", n, &[model]);
-    let sunshine = merged(hourly, "sunshine_duration", n, &[model]);
     let s = Series {
         low: &low,
         mid: &mid,
         high: &high,
         total: &total,
         visibility,
-        sunshine: &sunshine,
         humidity: &humidity,
         rain: &rain,
     };
@@ -376,7 +371,6 @@ fn ens_members(ens: &Value, anchor: Option<(usize, f32)>, base: &Inputs) -> Vec<
             visibility_km: base.visibility_km,
             aod: base.aod,
             rain_prob: base.rain_prob,
-            sunshine_frac: base.sunshine_frac,
         };
         if inp.cloud_total.is_none() && inp.cloud_low.is_none() {
             continue;
@@ -442,7 +436,6 @@ fn build_bundle(
     let visibility = merged(hourly, "visibility", n, models);
     let humidity = merged(hourly, "relative_humidity_2m", n, models);
     let rain = merged(hourly, "precipitation_probability", n, models);
-    let sunshine = merged(hourly, "sunshine_duration", n, models);
 
     let times: Vec<String> = (0..n)
         .filter_map(|i| time_at(hourly, i))
@@ -485,7 +478,6 @@ fn build_bundle(
             high: &cloud_high,
             total: &cloud_total,
             visibility: &visibility,
-            sunshine: &sunshine,
             humidity: &humidity,
             rain: &rain,
         };

@@ -22,8 +22,6 @@ pub struct Inputs {
     pub visibility_km: Option<f32>,
     pub aod: Option<f32>,
     pub rain_prob: Option<f32>,
-    /// 事件小时的日照占比（0..1），由 `sunshine_duration / 3600` 得来。
-    pub sunshine_frac: Option<f32>,
 }
 
 /// 分段线性插值，`pts` 需按 x 升序。
@@ -170,48 +168,25 @@ pub fn compute(inp: &Inputs) -> EventScore {
         );
     }
 
-    // ── 2. 通透度：阳光能否穿到地平线 ──
-    // 主信号用模型算的「该小时日照时长」（本身已包含云与气溶胶的辐射影响）；
-    // 能见度只在实际偏低（<20 km，霾/雾）时才扣分——GFS 的 visibility 在多数地区
-    // 常年顶在 24140 m 上限，当常态加分用等于每天凭空送分。
-    let sun_delta = inp.sunshine_frac.map_or(0.0, |f| {
-        curve(
-            f,
-            &[
-                (0.0, -0.10),
-                (0.25, -0.03),
-                (0.50, 0.05),
-                (0.75, 0.12),
-                (1.0, 0.16),
-            ],
-        )
-    });
+    // ── 2. 通透度：低能见度（霾/雾/沙尘）扣分 ──
+    // ⚠ 不用 `sunshine_duration`/`direct_radiation`：实测 GFS 的这两个场与云量自相矛盾
+    // （2026-10-17 17:00 总云 100% 却报日照 3600s；阴天与晴天在日出后一小时的直射占比
+    // 都是 0.50–0.57，没有区分度），而且 `sunshine_duration` 在标签 T 处统计 [T-1, T]，
+    // 日出那一小时全是黑夜，会把晴天日出白扣满。
+    // 也**不**拿能见度当常态加分：GFS 的 visibility 在多数地区常年顶在 24140 m 上限。
     let haze_delta = inp.visibility_km.map_or(0.0, |km| {
         if km >= 20.0 {
             0.0
         } else {
-            curve(
-                km,
-                &[(0.0, -0.10), (3.0, -0.08), (8.0, -0.04), (20.0, 0.0)],
-            )
+            curve(km, &[(0.0, -0.10), (3.0, -0.08), (8.0, -0.04), (20.0, 0.0)])
         }
     });
-    let mut vis_text = match inp.sunshine_frac {
-        Some(f) => format!("日照 {:.0}%", f * 100.0),
-        None => "日照无数据".to_string(),
+    let vis_text = match inp.visibility_km {
+        None => "无数据".to_string(),
+        Some(km) if km >= 20.0 => "空气质量良好".to_string(),
+        Some(km) => format!("能见 {km:.0} km"),
     };
-    if let Some(km) = inp.visibility_km {
-        if km < 20.0 {
-            vis_text.push_str(&format!(" · 能见 {km:.0} km"));
-        }
-    }
-    push(
-        &mut score,
-        &mut factors,
-        "通透度",
-        vis_text,
-        sun_delta + haze_delta,
-    );
+    push(&mut score, &mut factors, "通透度", vis_text, haze_delta);
 
     // ── 2b. 气溶胶（CAMS AOD）：适量增强暖色散射，过浓则灰蒙 ──
     let aod_delta = inp.aod.map_or(0.0, |a| {
@@ -292,7 +267,7 @@ pub fn compute(inp: &Inputs) -> EventScore {
         inp.cloud_high,
         inp.cloud_total,
         inp.humidity,
-        inp.sunshine_frac,
+        inp.visibility_km,
         inp.aod,
     ]
     .iter()
