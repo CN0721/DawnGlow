@@ -110,6 +110,10 @@ pub struct EventScore {
     pub rain_prob: Option<f32>,
     pub cloud_type: CloudType,
     pub factors: Vec<Factor>,
+    /// 各模式的独立评分（融合模式下不止一项），用于展示模型分歧。
+    pub model_scores: Vec<(String, f32)>,
+    /// 模式间分歧（0..1）：越大说明 GFS 与 ECMWF 越不一致。
+    pub spread: f32,
 }
 
 impl EventScore {

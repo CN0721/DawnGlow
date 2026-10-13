@@ -1,13 +1,17 @@
 //! 火烧云（朝霞/晚霞）鲜艳度评分。
 //!
-//! 移植并扩展 r-ayin/sunset-prediction (MIT) 的研究驱动型多因子模型：
-//! 云型配置、能见度、湿度、降水、总云量五个因子，另把 CAMS 的气溶胶光学厚度
-//! (AOD) 作为独立因子纳入「大气通透度」评估（Henriksson 2019 / Chen 2022 指出
-//! AOD 是影响晚霞观感的最重要单一特征之一）。
+//! 移植并扩展 r-ayin/sunset-prediction (MIT) 的研究驱动型多因子模型：云型配置、能见度、
+//! 湿度、降水、总云量五个因子，另把 CAMS 的气溶胶光学厚度 (AOD) 作为独立因子纳入
+//! 「大气通透度」评估（Henriksson 2019 / Chen 2022 指出 AOD 是影响晚霞观感的最重要
+//! 单一特征之一）。
+//!
+//! 所有因子都是**连续**打分（分段线性），不设阈值分档：早期版本用 if/else 把云型分成
+//! 五档，相邻档差 15–50 分，云量只要跨过阈值评分就跳一大截，GFS 与 ECMWF 平均后还会
+//! 恰好落进惩罚档。现在数值连续变化，评分曲线没有悬崖。
 
 use crate::model::{CloudType, EventScore, Factor};
 
-/// 评分输入（已在事件时段做过多源融合）。
+/// 评分输入（已在事件时刻做过多源融合）。
 #[derive(Clone, Debug, Default)]
 pub struct Inputs {
     pub cloud_low: Option<f32>,
@@ -20,149 +24,245 @@ pub struct Inputs {
     pub rain_prob: Option<f32>,
 }
 
-fn v(x: Option<f32>, fallback: f32) -> f32 {
-    x.unwrap_or(fallback)
+/// 分段线性插值，`pts` 需按 x 升序。
+fn curve(x: f32, pts: &[(f32, f32)]) -> f32 {
+    match pts.first() {
+        None => 0.0,
+        Some(&(x0, y0)) if x <= x0 => y0,
+        _ => {
+            for w in pts.windows(2) {
+                let (x0, y0) = w[0];
+                let (x1, y1) = w[1];
+                if x <= x1 {
+                    let t = if x1 > x0 { (x - x0) / (x1 - x0) } else { 0.0 };
+                    return y0 + (y1 - y0) * t;
+                }
+            }
+            pts[pts.len() - 1].1
+        }
+    }
+}
+
+/// 高云（卷云/卷积云）贡献：三到八成最理想，接近全阴时回落。
+fn high_cloud_score(high: f32) -> f32 {
+    curve(
+        high,
+        &[
+            (0.0, 0.0),
+            (10.0, 0.10),
+            (30.0, 0.30),
+            (55.0, 0.34),
+            (80.0, 0.30),
+            (95.0, 0.10),
+            (100.0, 0.0),
+        ],
+    )
+}
+
+/// 低云（层积云）贡献：二到五成最好，过少无云可染、过厚遮光。
+fn low_cloud_score(low: f32) -> f32 {
+    curve(
+        low,
+        &[
+            (0.0, 0.0),
+            (15.0, 0.05),
+            (25.0, 0.14),
+            (40.0, 0.18),
+            (55.0, 0.15),
+            (70.0, 0.04),
+            (85.0, -0.06),
+            (100.0, -0.10),
+        ],
+    )
+}
+
+/// 总云量修正：过厚扣分，晴空略扣，一成半到六成最优。
+fn total_cloud_adj(total: f32) -> f32 {
+    curve(
+        total,
+        &[
+            (0.0, -0.06),
+            (8.0, -0.02),
+            (15.0, 0.05),
+            (45.0, 0.05),
+            (60.0, 0.03),
+            (75.0, 0.0),
+            (90.0, -0.06),
+            (100.0, -0.10),
+        ],
+    )
+}
+
+/// 多层云加分：高、低云同时存在时纹理最丰富，按两者中较弱的一方加权。
+fn multi_layer_bonus(high: Option<f32>, low: Option<f32>) -> f32 {
+    match (high, low) {
+        (Some(h), Some(l)) => {
+            let a = curve(
+                h,
+                &[(0.0, 0.0), (15.0, 0.0), (35.0, 1.0), (60.0, 1.0), (100.0, 0.6)],
+            );
+            let b = curve(
+                l,
+                &[(0.0, 0.0), (10.0, 0.0), (25.0, 1.0), (60.0, 1.0), (100.0, 0.5)],
+            );
+            a.min(b) * 0.07
+        }
+        _ => 0.0,
+    }
+}
+
+/// 由连续量推出一个「最接近」的云型，仅用于展示文案。
+fn classify(inp: &Inputs) -> CloudType {
+    let (high, low, total) = (inp.cloud_high, inp.cloud_low, inp.cloud_total);
+    if total.map_or(false, |t| t > 80.0)
+        || (low.map_or(false, |l| l > 75.0) && high.map_or(true, |h| h < 20.0))
+    {
+        CloudType::Overcast
+    } else if total.map_or(false, |t| t < 10.0) {
+        CloudType::Clear
+    } else if high.map_or(false, |h| h >= 30.0) && low.map_or(true, |l| l < 40.0) {
+        CloudType::HighDominant
+    } else if low.map_or(false, |l| (20.0..=55.0).contains(&l)) && high.map_or(true, |h| h < 40.0) {
+        CloudType::LowDominant
+    } else {
+        CloudType::Mixed
+    }
+}
+
+fn push(score: &mut f32, factors: &mut Vec<Factor>, label: &str, value: String, delta: f32) {
+    *score += delta;
+    factors.push(Factor {
+        label: label.into(),
+        value,
+        delta,
+    });
 }
 
 /// 计算单个事件的鲜艳度评分（0..1）。
+///
+/// `confidence` 在这里只反映「数据是否齐全」；模式分歧的折扣由数据层施加。
 pub fn compute(inp: &Inputs) -> EventScore {
-    let high = v(inp.cloud_high, f32::NAN);
-    let total = v(inp.cloud_total, 50.0);
-
     let mut score = 0.0_f32;
     let mut factors: Vec<Factor> = Vec::new();
 
-    // ── 1. 云型配置 (~35%) ─────────────────────────────────────
-    let high_dominant = inp.cloud_high.map_or(false, |h| h >= 30.0)
-        && inp.cloud_low.map_or(true, |l| l < 40.0);
-    let low_dominant = inp.cloud_low.map_or(false, |l| (20.0..=55.0).contains(&l))
-        && inp.cloud_high.map_or(true, |h| h < 40.0);
-    let multi_layer = inp.cloud_high.map_or(false, |h| h > 15.0)
-        && inp.cloud_low.map_or(false, |l| l > 10.0);
-    let overcast = inp.cloud_total.map_or(false, |t| t > 80.0);
-    let clear_sky = inp.cloud_total.map_or(false, |t| t < 10.0);
+    // ── 1. 云型配置（高云 + 低云，连续）──
+    let ct_score = inp.cloud_high.map_or(0.0, high_cloud_score)
+        + inp.cloud_low.map_or(0.0, low_cloud_score);
+    push(
+        &mut score,
+        &mut factors,
+        "云型配置",
+        classify(inp).label().into(),
+        ct_score,
+    );
 
-    let (cloud_type, ct_score) = if high_dominant && !overcast {
-        (CloudType::HighDominant, 0.40)
-    } else if low_dominant && !overcast {
-        (CloudType::LowDominant, 0.28)
-    } else if (10.0..=75.0).contains(&total) {
-        (CloudType::Mixed, 0.22)
-    } else if clear_sky {
-        (CloudType::Clear, 0.05)
-    } else if overcast {
-        (CloudType::Overcast, -0.10)
-    } else {
-        (CloudType::Mixed, 0.12)
-    };
-    score += ct_score;
-    factors.push(Factor {
-        label: "云型配置".into(),
-        value: cloud_type.label().into(),
-        delta: ct_score,
-    });
-
-    if multi_layer {
-        score += 0.08;
-        factors.push(Factor {
-            label: "多层云加分".into(),
-            value: "高/低云并存，纹理丰富".into(),
-            delta: 0.08,
-        });
-    } else if cloud_type == CloudType::HighDominant && high > 40.0 {
-        score += 0.04;
-        factors.push(Factor {
-            label: "高云纹理".into(),
-            value: "卷云纹理细腻".into(),
-            delta: 0.04,
-        });
+    // 多层云加分
+    let multi = multi_layer_bonus(inp.cloud_high, inp.cloud_low);
+    if multi > 0.01 {
+        push(
+            &mut score,
+            &mut factors,
+            "多层云加分",
+            "高/低云并存，纹理丰富".into(),
+            multi,
+        );
     }
 
-    // ── 2. 能见度 (~25%，AOD 代理) ─────────────────────────────
-    let vis_delta = match inp.visibility_km {
-        None => 0.0,
-        Some(km) if km >= 20.0 => 0.18,
-        Some(km) if km >= 12.0 => 0.12,
-        Some(km) if km >= 6.0 => 0.05,
-        Some(_) => -0.08,
-    };
-    score += vis_delta;
-    factors.push(Factor {
-        label: "能见度".into(),
-        value: inp
-            .visibility_km
+    // ── 2. 能见度（AOD 代理）──
+    let vis_delta = inp.visibility_km.map_or(0.0, |km| {
+        curve(
+            km,
+            &[
+                (0.0, -0.08),
+                (3.0, -0.08),
+                (6.0, 0.05),
+                (12.0, 0.12),
+                (20.0, 0.18),
+                (60.0, 0.18),
+            ],
+        )
+    });
+    push(
+        &mut score,
+        &mut factors,
+        "能见度",
+        inp.visibility_km
             .map_or("无数据".into(), |km| format!("{km:.1} km")),
-        delta: vis_delta,
-    });
+        vis_delta,
+    );
 
-    // ── 2b. 气溶胶 (CAMS AOD) ─────────────────────────────────
-    // 适量气溶胶增强暖色散射；过浓则灰蒙。
-    let aod_delta = match inp.aod {
-        None => 0.0,
-        Some(a) if a <= 0.10 => 0.02,
-        Some(a) if a <= 0.40 => 0.06,
-        Some(a) if a <= 0.60 => 0.03,
-        Some(a) if a <= 0.80 => 0.0,
-        Some(_) => -0.08,
-    };
-    score += aod_delta;
-    factors.push(Factor {
-        label: "气溶胶 AOD".into(),
-        value: inp.aod.map_or("无数据".into(), |a| format!("{a:.2}")),
-        delta: aod_delta,
+    // ── 2b. 气溶胶（CAMS AOD）：适量增强暖色散射，过浓则灰蒙 ──
+    let aod_delta = inp.aod.map_or(0.0, |a| {
+        curve(
+            a,
+            &[
+                (0.0, 0.02),
+                (0.10, 0.02),
+                (0.25, 0.05),
+                (0.40, 0.06),
+                (0.60, 0.03),
+                (0.80, 0.0),
+                (1.0, -0.08),
+                (2.0, -0.08),
+            ],
+        )
     });
+    push(
+        &mut score,
+        &mut factors,
+        "气溶胶 AOD",
+        inp.aod.map_or("无数据".into(), |a| format!("{a:.2}")),
+        aod_delta,
+    );
 
-    // ── 3. 湿度 (~15%) ────────────────────────────────────────
-    let hum_delta = match inp.humidity {
-        None => 0.0,
-        Some(h) if (40.0..=60.0).contains(&h) => 0.15,
-        Some(h) if (30.0..40.0).contains(&h) || (60.0..=75.0).contains(&h) => 0.08,
-        Some(h) if h > 85.0 => -0.10,
-        Some(_) => 0.04,
-    };
-    score += hum_delta;
-    factors.push(Factor {
-        label: "相对湿度".into(),
-        value: inp.humidity.map_or("无数据".into(), |h| format!("{h:.0}%")),
-        delta: hum_delta,
+    // ── 3. 湿度 ──
+    let hum_delta = inp.humidity.map_or(0.0, |h| {
+        curve(
+            h,
+            &[
+                (0.0, 0.04),
+                (30.0, 0.04),
+                (40.0, 0.15),
+                (60.0, 0.15),
+                (75.0, 0.08),
+                (85.0, -0.10),
+                (100.0, -0.10),
+            ],
+        )
     });
+    push(
+        &mut score,
+        &mut factors,
+        "相对湿度",
+        inp.humidity.map_or("无数据".into(), |h| format!("{h:.0}%")),
+        hum_delta,
+    );
 
-    // ── 4. 降水惩罚 (~10%) ────────────────────────────────────
-    let rain_delta = match inp.rain_prob {
-        None => 0.0,
-        Some(r) if r > 50.0 => -0.15,
-        Some(r) if r > 25.0 => -0.08,
-        Some(_) => 0.0,
-    };
-    score += rain_delta;
-    factors.push(Factor {
-        label: "降水概率".into(),
-        value: inp.rain_prob.map_or("无数据".into(), |r| format!("{r:.0}%")),
-        delta: rain_delta,
+    // ── 4. 降水 ──
+    let rain_delta = inp.rain_prob.map_or(0.0, |r| {
+        curve(
+            r,
+            &[(0.0, 0.0), (25.0, 0.0), (35.0, -0.08), (50.0, -0.15), (100.0, -0.15)],
+        )
     });
+    push(
+        &mut score,
+        &mut factors,
+        "降水概率",
+        inp.rain_prob.map_or("无数据".into(), |r| format!("{r:.0}%")),
+        rain_delta,
+    );
 
-    // ── 5. 总云量修正 (~15%) ──────────────────────────────────
-    let tc = inp.cloud_total;
-    if let Some(tc) = tc {
-        if tc > 75.0 {
-            let penalty = -0.08 * ((tc - 75.0) / 25.0);
-            score += penalty;
-            factors.push(Factor {
-                label: "总云量修正".into(),
-                value: format!("{tc:.0}% 过厚"),
-                delta: penalty,
-            });
-        } else if (15.0..=60.0).contains(&tc) {
-            score += 0.05;
-            factors.push(Factor {
-                label: "总云量修正".into(),
-                value: format!("{tc:.0}% 最优区间"),
-                delta: 0.05,
-            });
-        }
+    // ── 5. 总云量修正 ──
+    if let Some(tc) = inp.cloud_total {
+        push(
+            &mut score,
+            &mut factors,
+            "总云量修正",
+            format!("{tc:.0}%"),
+            total_cloud_adj(tc),
+        );
     }
-
-    let score = score.clamp(0.0, 1.0);
 
     let data_points = [
         inp.cloud_low,
@@ -176,11 +276,10 @@ pub fn compute(inp: &Inputs) -> EventScore {
     .iter()
     .filter(|x| x.is_some())
     .count();
-    let confidence = (data_points as f32 / 7.0 + 0.1).min(1.0);
 
     EventScore {
-        score,
-        confidence,
+        score: score.clamp(0.0, 1.0),
+        confidence: (data_points as f32 / 7.0 + 0.1).min(1.0),
         cloud_low: inp.cloud_low,
         cloud_mid: inp.cloud_mid,
         cloud_high: inp.cloud_high,
@@ -189,7 +288,9 @@ pub fn compute(inp: &Inputs) -> EventScore {
         visibility_km: inp.visibility_km,
         aod: inp.aod,
         rain_prob: inp.rain_prob,
-        cloud_type,
+        cloud_type: classify(inp),
         factors,
+        model_scores: Vec::new(),
+        spread: 0.0,
     }
 }

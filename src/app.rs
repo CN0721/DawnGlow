@@ -26,6 +26,10 @@ pub struct DawnGlowApp {
     pub bundle: ForecastBundle,
     pub loading: bool,
     pub status: String,
+    /// 各事件相对上一次刷新的分数变化：(日期, 是否朝霞) → 差值。
+    pub score_deltas: std::collections::HashMap<(String, bool), f32>,
+    /// 上一次刷新的分数，仅用于算差值。
+    prev_scores: std::collections::HashMap<(String, bool), f32>,
     pub fetch_rx: Option<Receiver<Result<ForecastBundle, String>>>,
     pub loc_rx: Option<Receiver<Result<(f64, f64, String), String>>>,
     pub search_query: String,
@@ -102,6 +106,8 @@ impl DawnGlowApp {
             bundle: ForecastBundle::default(),
             loading: false,
             status: String::new(),
+            score_deltas: std::collections::HashMap::new(),
+            prev_scores: std::collections::HashMap::new(),
             fetch_rx: None,
             loc_rx: None,
             search_query: String::new(),
@@ -158,6 +164,23 @@ impl DawnGlowApp {
         });
     }
 
+    /// 记录本次刷新相对上一次的分数变化（用于「较上次刷新 ±X」）。
+    fn record_deltas(&mut self, b: &ForecastBundle) {
+        let mut deltas = std::collections::HashMap::new();
+        let mut cur = std::collections::HashMap::new();
+        for d in &b.days {
+            for (dawn, sc) in [(true, &d.sunrise_score), (false, &d.sunset_score)] {
+                let key = (d.date.clone(), dawn);
+                if let Some(prev) = self.prev_scores.get(&key) {
+                    deltas.insert(key.clone(), sc.score - prev);
+                }
+                cur.insert(key, sc.score);
+            }
+        }
+        self.score_deltas = deltas;
+        self.prev_scores = cur;
+    }
+
     fn poll_fetch(&mut self, ctx: &egui::Context) {
         if let Some(rx) = &self.fetch_rx {
             match rx.try_recv() {
@@ -169,6 +192,7 @@ impl DawnGlowApp {
                         self.reveal_at = Some(ctx.input(|i| i.time));
                         self.reveal_done = false;
                     }
+                    self.record_deltas(&b);
                     self.bundle = b;
                     self.day = self.day.min(self.bundle.days.len().saturating_sub(1));
                     self.status.clear();
@@ -256,6 +280,8 @@ impl DawnGlowApp {
         self.day = 0;
         // 清空旧数据：新地点先显示骨架屏
         self.bundle = ForecastBundle::default();
+        self.score_deltas.clear();
+        self.prev_scores.clear();
         self.reveal_at = None;
         self.reveal_done = true;
         self.start_fetch(ctx);
@@ -919,6 +945,9 @@ impl DawnGlowApp {
     /// 切换预报模式（并重新拉取）。
     pub fn set_model_mode(&mut self, m: ModelMode, ctx: &egui::Context) {
         self.model_mode = m;
+        // 模式变了，分数差异反映的是模式而非刷新
+        self.score_deltas.clear();
+        self.prev_scores.clear();
         self.save_config();
         self.start_fetch(ctx);
     }

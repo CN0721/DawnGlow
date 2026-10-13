@@ -757,7 +757,11 @@ fn score_card(app: &DawnGlowApp, ui: &mut egui::Ui, day: &DayForecast, kind: Eve
         .time_for(kind)
         .map(|t| format!("时间 {t}"))
         .unwrap_or_else(|| "时间 —".into());
-    let conf_text = format!("置信度 {:.0}%", sc.confidence * 100.0);
+    let conf_text = if sc.spread >= 0.15 {
+        format!("置信度 {:.0}% · 模式分歧较大", sc.confidence * 100.0)
+    } else {
+        format!("置信度 {:.0}%", sc.confidence * 100.0)
+    };
     let title = format!("{} {} · {}", kind.emoji(), kind.label(), day.date.get(5..).unwrap_or(""));
     let grade = sc.grade().to_string();
     card(ui, &p, |ui| {
@@ -794,6 +798,31 @@ fn score_card(app: &DawnGlowApp, ui: &mut egui::Ui, day: &DayForecast, kind: Eve
                 ui.add_space(2.0);
                 wrapped(ui, tw, &time_text, FS_SECTION, p.dim);
                 wrapped(ui, tw, &conf_text, FS_CAPTION, p.dim);
+                if !sc.model_scores.is_empty() {
+                    let per = sc
+                        .model_scores
+                        .iter()
+                        .map(|(n, v)| format!("{n} {:.0}%", v * 100.0))
+                        .collect::<Vec<_>>()
+                        .join(" · ");
+                    let line = format!("{per} · 分歧 {:.0} 分", sc.spread * 100.0);
+                    wrapped(ui, tw, &line, FS_CAPTION, p.dim);
+                }
+                if let Some(d) = app
+                    .score_deltas
+                    .get(&(day.date.clone(), kind == EventKind::Sunrise))
+                {
+                    if d.abs() >= 0.01 {
+                        let col = if *d > 0.0 { p.gold } else { p.dim };
+                        wrapped(
+                            ui,
+                            tw,
+                            &format!("较上次刷新 {:+.0}", d * 100.0),
+                            FS_CAPTION,
+                            col,
+                        );
+                    }
+                }
             });
         });
     });
