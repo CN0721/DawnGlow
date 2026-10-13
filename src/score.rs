@@ -1,6 +1,6 @@
 //! 火烧云（朝霞/晚霞）鲜艳度评分。
 //!
-//! 移植并扩展 r-ayin/sunset-prediction (MIT) 的研究驱动型多因子模型：云型配置、能见度、
+//! 移植并扩展 r-ayin/sunset-prediction (MIT) 的研究驱动型多因子模型：云型配置、通透度、
 //! 湿度、降水、总云量五个因子，另把 CAMS 的气溶胶光学厚度 (AOD) 作为独立因子纳入
 //! 「大气通透度」评估（Henriksson 2019 / Chen 2022 指出 AOD 是影响晚霞观感的最重要
 //! 单一特征之一）。
@@ -22,6 +22,8 @@ pub struct Inputs {
     pub visibility_km: Option<f32>,
     pub aod: Option<f32>,
     pub rain_prob: Option<f32>,
+    /// 事件小时的日照占比（0..1），由 `sunshine_duration / 3600` 得来。
+    pub sunshine_frac: Option<f32>,
 }
 
 /// 分段线性插值，`pts` 需按 x 升序。
@@ -168,27 +170,47 @@ pub fn compute(inp: &Inputs) -> EventScore {
         );
     }
 
-    // ── 2. 能见度（AOD 代理）──
-    let vis_delta = inp.visibility_km.map_or(0.0, |km| {
+    // ── 2. 通透度：阳光能否穿到地平线 ──
+    // 主信号用模型算的「该小时日照时长」（本身已包含云与气溶胶的辐射影响）；
+    // 能见度只在实际偏低（<20 km，霾/雾）时才扣分——GFS 的 visibility 在多数地区
+    // 常年顶在 24140 m 上限，当常态加分用等于每天凭空送分。
+    let sun_delta = inp.sunshine_frac.map_or(0.0, |f| {
         curve(
-            km,
+            f,
             &[
-                (0.0, -0.08),
-                (3.0, -0.08),
-                (6.0, 0.05),
-                (12.0, 0.12),
-                (20.0, 0.18),
-                (60.0, 0.18),
+                (0.0, -0.10),
+                (0.25, -0.03),
+                (0.50, 0.05),
+                (0.75, 0.12),
+                (1.0, 0.16),
             ],
         )
     });
+    let haze_delta = inp.visibility_km.map_or(0.0, |km| {
+        if km >= 20.0 {
+            0.0
+        } else {
+            curve(
+                km,
+                &[(0.0, -0.10), (3.0, -0.08), (8.0, -0.04), (20.0, 0.0)],
+            )
+        }
+    });
+    let mut vis_text = match inp.sunshine_frac {
+        Some(f) => format!("日照 {:.0}%", f * 100.0),
+        None => "日照无数据".to_string(),
+    };
+    if let Some(km) = inp.visibility_km {
+        if km < 20.0 {
+            vis_text.push_str(&format!(" · 能见 {km:.0} km"));
+        }
+    }
     push(
         &mut score,
         &mut factors,
-        "能见度",
-        inp.visibility_km
-            .map_or("无数据".into(), |km| format!("{km:.1} km")),
-        vis_delta,
+        "通透度",
+        vis_text,
+        sun_delta + haze_delta,
     );
 
     // ── 2b. 气溶胶（CAMS AOD）：适量增强暖色散射，过浓则灰蒙 ──
@@ -270,7 +292,7 @@ pub fn compute(inp: &Inputs) -> EventScore {
         inp.cloud_high,
         inp.cloud_total,
         inp.humidity,
-        inp.visibility_km,
+        inp.sunshine_frac,
         inp.aod,
     ]
     .iter()
@@ -292,5 +314,9 @@ pub fn compute(inp: &Inputs) -> EventScore {
         factors,
         model_scores: Vec::new(),
         spread: 0.0,
+        ens_prob: None,
+        ens_median: None,
+        ens_range: None,
+        ens_count: 0,
     }
 }

@@ -798,6 +798,33 @@ fn score_card(app: &DawnGlowApp, ui: &mut egui::Ui, day: &DayForecast, kind: Eve
                 ui.add_space(2.0);
                 wrapped(ui, tw, &time_text, FS_SECTION, p.dim);
                 wrapped(ui, tw, &conf_text, FS_CAPTION, p.dim);
+                if let (Some(prob), Some(med), Some((lo, hi))) =
+                    (sc.ens_prob, sc.ens_median, sc.ens_range)
+                {
+                    wrapped(
+                        ui,
+                        tw,
+                        &format!(
+                            "{:.0}% 成员认为值得出工（≥60%，共 {}）",
+                            prob * 100.0,
+                            sc.ens_count
+                        ),
+                        FS_CAPTION,
+                        p.gold,
+                    );
+                    wrapped(
+                        ui,
+                        tw,
+                        &format!(
+                            "成员中位 {:.0}% · 区间 {:.0}–{:.0}%",
+                            med * 100.0,
+                            lo * 100.0,
+                            hi * 100.0
+                        ),
+                        FS_CAPTION,
+                        p.dim,
+                    );
+                }
                 if !sc.model_scores.is_empty() {
                     let per = sc
                         .model_scores

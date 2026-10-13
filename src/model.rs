@@ -112,8 +112,16 @@ pub struct EventScore {
     pub factors: Vec<Factor>,
     /// 各模式的独立评分（融合模式下不止一项），用于展示模型分歧。
     pub model_scores: Vec<(String, f32)>,
-    /// 模式间分歧（0..1）：越大说明 GFS 与 ECMWF 越不一致。
+    /// 模式间分歧（0..1）：越大说明各模式越不一致。
     pub spread: f32,
+    /// 集合成员中「值得出工」（≥60%，与 `grade()` 口径一致）的比例；无集合数据时为 `None`。
+    pub ens_prob: Option<f32>,
+    /// 集合成员评分的中位数。
+    pub ens_median: Option<f32>,
+    /// 集合成员评分的区间（最低, 最高）。
+    pub ens_range: Option<(f32, f32)>,
+    /// 集合成员数。
+    pub ens_count: usize,
 }
 
 impl EventScore {

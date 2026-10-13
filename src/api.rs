@@ -29,12 +29,24 @@ pub enum ModelMode {
     Ecmwf,
 }
 
+/// 融合模式使用的多模式集合（实测在中国区域均有云量数据）。
+const MODELS_BLEND: [&str; 8] = [
+    "gfs_seamless",
+    "ecmwf_ifs025",
+    "icon_seamless",
+    "gem_seamless",
+    "jma_seamless",
+    "cma_grapes_global",
+    "ukmo_seamless",
+    "metno_seamless",
+];
+
 impl ModelMode {
     pub const ALL: [ModelMode; 3] = [ModelMode::Blend, ModelMode::Gfs, ModelMode::Ecmwf];
 
     pub fn name(self) -> &'static str {
         match self {
-            ModelMode::Blend => "融合 GFS+ECMWF",
+            ModelMode::Blend => "多模式集合",
             ModelMode::Gfs => "仅 NCEP GFS",
             ModelMode::Ecmwf => "仅 ECMWF IFS",
         }
@@ -42,15 +54,15 @@ impl ModelMode {
 
     pub fn desc(self) -> &'static str {
         match self {
-            ModelMode::Blend => "两模式平均（推荐）；两者刷新不同步时数值会变动",
-            ModelMode::Gfs => "只看 GFS（能见度可用，刷新时更一致）",
-            ModelMode::Ecmwf => "只看 ECMWF（注意：无 visibility，能见度会缺）",
+            ModelMode::Blend => "8 个模式取中位数，并给出集合概率（推荐）",
+            ModelMode::Gfs => "只看 GFS，刷新时更一致",
+            ModelMode::Ecmwf => "只看 ECMWF（无 visibility，不扣霾分）",
         }
     }
 
     pub fn models(self) -> &'static [&'static str] {
         match self {
-            ModelMode::Blend => &["gfs_seamless", "ecmwf_ifs025"],
+            ModelMode::Blend => &MODELS_BLEND,
             ModelMode::Gfs => &["gfs_seamless"],
             ModelMode::Ecmwf => &["ecmwf_ifs025"],
         }
@@ -87,19 +99,34 @@ pub fn fetch_bundle(loc: &Location, mode: ModelMode) -> Result<ForecastBundle, S
     let models = mode.models();
     let aq_url = aq_url(loc.lat, loc.lon);
     let aq_handle = std::thread::spawn(move || get_json(&aq_url, 2, 10).ok());
+    // 集合预报只在多模式集合下才需要；体积较大（~110 KB），失败不致命
+    let ens_handle = (models.len() > 1).then(|| {
+        let u = ens_url(loc.lat, loc.lon);
+        std::thread::spawn(move || get_json(&u, 1, 25).ok())
+    });
     let fc = get_json(&forecast_url(loc.lat, loc.lon, models), 2, 8)?;
     let aq = aq_handle.join().ok().flatten();
-    build_bundle(loc, &fc, aq.as_ref(), models)
+    let ens = ens_handle.and_then(|h| h.join().ok()).flatten();
+    build_bundle(loc, &fc, aq.as_ref(), ens.as_ref(), models)
 }
 
 fn forecast_url(lat: f64, lon: f64, models: &[&str]) -> String {
     format!(
         "https://api.open-meteo.com/v1/forecast?latitude={lat:.4}&longitude={lon:.4}\
-&hourly=cloud_cover_low,cloud_cover_mid,cloud_cover_high,cloud_cover,visibility,relative_humidity_2m,precipitation_probability\
+&hourly=cloud_cover_low,cloud_cover_mid,cloud_cover_high,cloud_cover,visibility,relative_humidity_2m,precipitation_probability,direct_radiation,sunshine_duration\
 &daily=sunrise,sunset,precipitation_probability_mean\
 &models={}\
 &timezone=auto&forecast_days={FORECAST_DAYS}",
         models.join(",")
+    )
+}
+
+/// 集合预报（ECMWF ENS 51 + NCEP GEFS 31 = 82 个成员）的云量，用于算概率。
+fn ens_url(lat: f64, lon: f64) -> String {
+    format!(
+        "https://ensemble-api.open-meteo.com/v1/ensemble?latitude={lat:.4}&longitude={lon:.4}\
+&hourly=cloud_cover_low,cloud_cover_mid,cloud_cover_high,cloud_cover\
+&models=ecmwf_ifs025_ensemble,ncep_gefs025&timezone=auto&forecast_days={FORECAST_DAYS}"
     )
 }
 
@@ -132,23 +159,27 @@ fn series_for<'a>(root: &'a Value, var: &str, model: &str) -> Option<&'a Vec<Val
     series(root, &format!("{var}_{model}")).or_else(|| series(root, var))
 }
 
-/// 取某变量在多个模式下的融合序列（逐时算术平均）。
+/// 取某变量在多个模式下的**中位数**序列。
+///
+/// 取中位数而非算术平均：各模式常常一个报晴、一个报阴，平均会落到两者都不预测的
+/// 「中间态」；模式越多中位数越稳。
 fn merged(root: &Value, var: &str, n: usize, models: &[&str]) -> Vec<Option<f32>> {
     let mut out = vec![None; n];
     for i in 0..n {
-        let mut sum = 0.0;
-        let mut cnt = 0;
-        for &m in models {
-            if let Some(arr) = series_for(root, var, m) {
-                if let Some(x) = arr.get(i).and_then(as_f32) {
-                    sum += x;
-                    cnt += 1;
-                }
-            }
+        let mut vals: Vec<f32> = models
+            .iter()
+            .filter_map(|&m| series_for(root, var, m).and_then(|a| a.get(i)).and_then(as_f32))
+            .collect();
+        if vals.is_empty() {
+            continue;
         }
-        if cnt > 0 {
-            out[i] = Some(sum / cnt as f32);
-        }
+        vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let k = vals.len();
+        out[i] = Some(if k % 2 == 1 {
+            vals[k / 2]
+        } else {
+            (vals[k / 2 - 1] + vals[k / 2]) / 2.0
+        });
     }
     out
 }
@@ -203,6 +234,8 @@ struct Series<'a> {
     high: &'a [Option<f32>],
     total: &'a [Option<f32>],
     visibility: &'a [Option<f32>],
+    /// 日照时长（秒/小时）
+    sunshine: &'a [Option<f32>],
     humidity: &'a [Option<f32>],
     rain: &'a [Option<f32>],
 }
@@ -241,9 +274,9 @@ fn at_event(arr: &[Option<f32>], idx: usize, frac: f32) -> Option<f32> {
     }
 }
 
-/// 在给定锚点上算一个事件的评分。
-fn score_at(s: &Series, idx: usize, frac: f32, aod: Option<f32>) -> EventScore {
-    let inp = Inputs {
+/// 在给定锚点上组装一份评分输入。
+fn inputs_at(s: &Series, idx: usize, frac: f32, aod: Option<f32>) -> Inputs {
+    Inputs {
         cloud_low: at_event(s.low, idx, frac),
         cloud_mid: at_event(s.mid, idx, frac),
         cloud_high: at_event(s.high, idx, frac),
@@ -252,24 +285,13 @@ fn score_at(s: &Series, idx: usize, frac: f32, aod: Option<f32>) -> EventScore {
         visibility_km: at_event(s.visibility, idx, frac).map(|m| m / 1000.0),
         aod,
         rain_prob: at_event(s.rain, idx, frac),
-    };
-    score::compute(&inp)
+        sunshine_frac: at_event(s.sunshine, idx, frac).map(|s| s / 3600.0),
+    }
 }
 
-/// 某个事件在指定锚点上的评分（含 AOD 对齐）。
-fn score_for(
-    s: &Series,
-    anchor: Option<(usize, f32)>,
-    times: &[String],
-    aod_map: &HashMap<String, f32>,
-) -> EventScore {
-    match anchor {
-        None => EventScore::default(),
-        Some((idx, frac)) => {
-            let aod = times.get(idx).and_then(|t| aod_map.get(t).copied());
-            score_at(s, idx, frac, aod)
-        }
-    }
+/// 在给定锚点上算一个事件的评分。
+fn score_at(s: &Series, idx: usize, frac: f32, aod: Option<f32>) -> EventScore {
+    score::compute(&inputs_at(s, idx, frac, aod))
 }
 
 /// 只用其中**一个**模式重算某事件的评分（用于展示模式分歧）。
@@ -293,12 +315,14 @@ fn model_score(
     let total = merged(hourly, "cloud_cover", n, &[model]);
     let humidity = merged(hourly, "relative_humidity_2m", n, &[model]);
     let rain = merged(hourly, "precipitation_probability", n, &[model]);
+    let sunshine = merged(hourly, "sunshine_duration", n, &[model]);
     let s = Series {
         low: &low,
         mid: &mid,
         high: &high,
         total: &total,
         visibility,
+        sunshine: &sunshine,
         humidity: &humidity,
         rain: &rain,
     };
@@ -307,7 +331,8 @@ fn model_score(
     Some(score_at(&s, idx, frac, aod).score)
 }
 
-/// 把各模式评分写进结果：记录分歧，并按分歧度打折置信度。
+/// 把各模式评分写进结果：记录分歧（用于展示，以及无集合数据时的置信度折扣）。
+/// 只把前两个模式留给展示，避免 8 个模式把界面撑爆。
 fn apply_models(sc: &mut EventScore, scores: Vec<(String, f32)>) {
     if scores.len() < 2 {
         return;
@@ -317,16 +342,89 @@ fn apply_models(sc: &mut EventScore, scores: Vec<(String, f32)>) {
         .iter()
         .map(|(_, v)| *v)
         .fold(f32::NEG_INFINITY, f32::max);
-    let spread = (hi - lo).clamp(0.0, 1.0);
-    sc.spread = spread;
-    sc.confidence = (sc.confidence * (1.0 - spread * 0.6)).clamp(0.05, 1.0);
-    sc.model_scores = scores;
+    sc.spread = (hi - lo).clamp(0.0, 1.0);
+    sc.model_scores = scores.into_iter().take(2).collect();
+}
+
+/// 集合成员逐个评分：云量用成员自己的，其余变量沿用多模式中位状态。
+/// 返回 `(分数, 完整评分)`，以便取中位成员当代表。
+fn ens_members(ens: &Value, anchor: Option<(usize, f32)>, base: &Inputs) -> Vec<(f32, EventScore)> {
+    let (Some(hourly), Some((idx, frac))) = (ens.get("hourly"), anchor) else {
+        return Vec::new();
+    };
+    let Some(obj) = hourly.as_object() else {
+        return Vec::new();
+    };
+    let mut suffixes: Vec<&str> = obj
+        .keys()
+        .filter_map(|k| k.strip_prefix("cloud_cover_low"))
+        .collect();
+    suffixes.sort_unstable();
+    let mut out = Vec::with_capacity(suffixes.len());
+    for suf in suffixes {
+        let arr = |var: &str| -> Vec<Option<f32>> {
+            series(hourly, &format!("{var}{suf}"))
+                .map(|a| a.iter().map(as_f32).collect())
+                .unwrap_or_default()
+        };
+        let inp = Inputs {
+            cloud_low: at_event(&arr("cloud_cover_low"), idx, frac),
+            cloud_mid: at_event(&arr("cloud_cover_mid"), idx, frac),
+            cloud_high: at_event(&arr("cloud_cover_high"), idx, frac),
+            cloud_total: at_event(&arr("cloud_cover"), idx, frac),
+            humidity: base.humidity,
+            visibility_km: base.visibility_km,
+            aod: base.aod,
+            rain_prob: base.rain_prob,
+            sunshine_frac: base.sunshine_frac,
+        };
+        if inp.cloud_total.is_none() && inp.cloud_low.is_none() {
+            continue;
+        }
+        let sc = score::compute(&inp);
+        out.push((sc.score, sc));
+    }
+    out
+}
+
+/// 「值得出工」阈值，与 `EventScore::grade()` 的「很好 · 值得出工」一致。
+const WORTH: f32 = 0.60;
+
+/// 集合成员 → 以**中位成员**为代表（这样因子明细与总分自洽，不是「平均输入再打分」），
+/// 并填入概率 / 中位数 / 区间，置信度按「与主结论相左的成员比例」打折。
+fn ens_representative(
+    ens: &Value,
+    anchor: Option<(usize, f32)>,
+    base: &Inputs,
+    confidence_base: f32,
+) -> Option<EventScore> {
+    let mut members = ens_members(ens, anchor, base);
+    if members.len() < 5 {
+        return None;
+    }
+    members.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let n = members.len();
+    let median = if n % 2 == 1 {
+        members[n / 2].0
+    } else {
+        (members[n / 2 - 1].0 + members[n / 2].0) / 2.0
+    };
+    let prob = members.iter().filter(|m| m.0 >= WORTH).count() as f32 / n as f32;
+    let (rep_score, mut rep) = members[n / 2].clone();
+    let agree = if rep_score >= WORTH { prob } else { 1.0 - prob };
+    rep.ens_prob = Some(prob);
+    rep.ens_median = Some(median);
+    rep.ens_range = Some((members[0].0, members[n - 1].0));
+    rep.ens_count = n;
+    rep.confidence = (confidence_base * (1.0 - (1.0 - agree) * 0.5)).clamp(0.05, 1.0);
+    Some(rep)
 }
 
 fn build_bundle(
     loc: &Location,
     fc: &Value,
     aq: Option<&Value>,
+    ens: Option<&Value>,
     models: &[&str],
 ) -> Result<ForecastBundle, String> {
     let hourly = fc.get("hourly").ok_or("预报缺少 hourly 字段")?;
@@ -344,6 +442,7 @@ fn build_bundle(
     let visibility = merged(hourly, "visibility", n, models);
     let humidity = merged(hourly, "relative_humidity_2m", n, models);
     let rain = merged(hourly, "precipitation_probability", n, models);
+    let sunshine = merged(hourly, "sunshine_duration", n, models);
 
     let times: Vec<String> = (0..n)
         .filter_map(|i| time_at(hourly, i))
@@ -386,17 +485,33 @@ fn build_bundle(
             high: &cloud_high,
             total: &cloud_total,
             visibility: &visibility,
+            sunshine: &sunshine,
             humidity: &humidity,
             rain: &rain,
         };
-        let mut sunrise_score = score_for(&s, sunrise_anchor, &times, &aod_map);
-        let mut sunset_score = score_for(&s, sunset_anchor, &times, &aod_map);
+        let mk = |anchor: Option<(usize, f32)>| -> (EventScore, Option<Inputs>) {
+            match anchor {
+                None => (EventScore::default(), None),
+                Some((i, f)) => {
+                    let inp = inputs_at(
+                        &s,
+                        i,
+                        f,
+                        times.get(i).and_then(|t| aod_map.get(t).copied()),
+                    );
+                    let sc = score::compute(&inp);
+                    (sc, Some(inp))
+                }
+            }
+        };
+        let (mut sunrise_score, sunrise_inp) = mk(sunrise_anchor);
+        let (mut sunset_score, sunset_inp) = mk(sunset_anchor);
 
-        // 融合模式下另算各模式的独立评分，用于展示分歧。
+        // 多模式集合：各模式独立评分 + 集合概率
         if models.len() > 1 {
-            for (anchor, sc) in [
-                (sunrise_anchor, &mut sunrise_score),
-                (sunset_anchor, &mut sunset_score),
+            for (anchor, sc, base) in [
+                (sunrise_anchor, &mut sunrise_score, sunrise_inp.as_ref()),
+                (sunset_anchor, &mut sunset_score, sunset_inp.as_ref()),
             ] {
                 let scores = models
                     .iter()
@@ -406,6 +521,20 @@ fn build_bundle(
                     })
                     .collect::<Vec<_>>();
                 apply_models(sc, scores);
+                let spread = sc.spread;
+                let shown = sc.model_scores.clone();
+                let availability = sc.confidence;
+                // 集合可用时以中位成员为主口径；否则回退到中位输入的状态
+                if let (Some(ens), Some(base)) = (ens, base) {
+                    if let Some(rep) = ens_representative(ens, anchor, base, availability) {
+                        *sc = rep;
+                    }
+                }
+                if sc.ens_prob.is_none() {
+                    sc.confidence = (availability * (1.0 - spread * 0.6)).clamp(0.05, 1.0);
+                }
+                sc.spread = spread;
+                sc.model_scores = shown;
             }
         }
 
