@@ -5,7 +5,7 @@
 //! 在固定列宽内自动换行（先算出换行后高度再精确占位，绝不横向溢出）。
 
 use eframe::egui;
-use egui::{Align, Align2, Color32, FontId, Layout, Pos2, Rect, RichText, Sense, Stroke, Vec2};
+use egui::{Align, Align2, Color32, FontId, Layout, Pos2, Rect, Response, RichText, Sense, Stroke, Vec2};
 
 use crate::app::DawnGlowApp;
 use crate::api::ModelMode;
@@ -1277,84 +1277,453 @@ fn map(app: &mut DawnGlowApp, ui: &mut egui::Ui, ctx: &egui::Context) {
 
 // ---------- 设置页 ----------
 
+// ---------- 自研组件：分组设置列表 ----------
+//
+// 结构：分组标签 + 零内边距卡片 + 行（图标方块 / 标题 / 副标题 / 右侧控件）+ 行分隔线。
+// 整行可点（`Sense::click`）并带悬停/按下反馈；右侧控件全用绘制而非嵌套 Button，
+// 避免与全局 Button 样式互相打架，也便于统一动效。
+
+/// 图标方块边长
+const ICON: f32 = 34.0;
+/// 设置行高度
+const ROW_H: f32 = 60.0;
+/// 行左右内边距
+const ROW_PAD: f32 = 16.0;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Icon {
+    Text,
+    Model,
+    Map,
+    Display,
+    Info,
+    Tag,
+}
+
+/// 分组标题（卡片上方的小字）。
+fn group_label(ui: &mut egui::Ui, p: &Palette, text: &str) {
+    ui.add_space(SP_MD);
+    let w = ui.available_width();
+    wrapped(ui, w, text, FS_CAPTION, p.dim);
+    ui.add_space(SP_XS);
+}
+
+/// 分组卡片：零内边距，行之间由 `divider` 分隔。
+fn group_card<R>(ui: &mut egui::Ui, p: &Palette, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let mut frame = egui::Frame::NONE
+        .fill(p.card_fill)
+        .corner_radius(p.card_radius);
+    if p.card_stroke != Color32::TRANSPARENT {
+        frame = frame.stroke(Stroke::new(1.0_f32, p.card_stroke));
+    }
+    frame
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            ui.set_width(ui.available_width());
+            add(ui)
+        })
+        .inner
+}
+
+/// 行间分隔线。
+fn divider(ui: &mut egui::Ui, p: &Palette) {
+    let w = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(w, 1.0), Sense::hover());
+    let y = rect.center().y;
+    ui.painter().line_segment(
+        [
+            Pos2::new(rect.left() + ROW_PAD, y),
+            Pos2::new(rect.right() - ROW_PAD, y),
+        ],
+        Stroke::new(1.0_f32, with_alpha(p.card_stroke, 1.2)),
+    );
+}
+
+/// 带左右内边距的自适应区块（用于说明文字）。
+fn pad_block<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let w = ui.available_width();
+    ui.horizontal_top(|ui| {
+        ui.add_space(ROW_PAD);
+        ui.vertical(|ui| {
+            ui.set_max_width((w - 2.0 * ROW_PAD).max(40.0));
+            ui.spacing_mut().item_spacing.y = SP_XS;
+            add(ui)
+        })
+        .inner
+    })
+    .inner
+}
+
+/// 矢量图标（画在 34×34 方块中央）。
+fn draw_icon(pa: &egui::Painter, c: Pos2, icon: Icon, col: Color32) {
+    let st = Stroke::new(1.6_f32, col);
+    match icon {
+        Icon::Text => {
+            pa.text(c, Align2::CENTER_CENTER, "Aa", FontId::proportional(13.0), col);
+        }
+        Icon::Model => {
+            for (i, w) in [12.0_f32, 9.0, 5.5].iter().enumerate() {
+                let y = c.y - 5.5 + i as f32 * 5.5;
+                pa.line_segment([Pos2::new(c.x - 6.0, y), Pos2::new(c.x - 6.0 + w, y)], st);
+            }
+        }
+        Icon::Map => {
+            let cy = c.y - 2.5;
+            pa.circle_stroke(Pos2::new(c.x, cy), 4.6, st);
+            pa.line_segment([Pos2::new(c.x - 2.7, cy + 3.6), Pos2::new(c.x, cy + 8.6)], st);
+            pa.line_segment([Pos2::new(c.x + 2.7, cy + 3.6), Pos2::new(c.x, cy + 8.6)], st);
+        }
+        Icon::Display => {
+            let cy = c.y - 2.0;
+            pa.circle_stroke(Pos2::new(c.x, cy), 3.8, st);
+            pa.line_segment([Pos2::new(c.x, cy - 8.6), Pos2::new(c.x, cy - 6.2)], st);
+            pa.line_segment([Pos2::new(c.x, cy + 6.2), Pos2::new(c.x, cy + 8.6)], st);
+            pa.line_segment([Pos2::new(c.x - 8.6, cy), Pos2::new(c.x - 6.2, cy)], st);
+            pa.line_segment([Pos2::new(c.x + 6.2, cy), Pos2::new(c.x + 8.6, cy)], st);
+        }
+        Icon::Info => {
+            pa.circle_stroke(c, 7.0, st);
+            pa.text(
+                Pos2::new(c.x, c.y - 0.5),
+                Align2::CENTER_CENTER,
+                "i",
+                FontId::proportional(10.0),
+                col,
+            );
+        }
+        Icon::Tag => {
+            let r = Rect::from_center_size(c, Vec2::new(15.0, 10.0));
+            pa.rect_stroke(r, 3.0, st, egui::StrokeKind::Inside);
+            pa.circle_filled(Pos2::new(r.left() + 3.6, c.y), 1.2, col);
+        }
+    }
+}
+
+/// 一行的基础几何与命中区域。
+struct RowGeom {
+    rect: Rect,
+    resp: Response,
+    icon: Rect,
+    text_x: f32,
+    text_w: f32,
+    trail: Rect,
+}
+
+fn row_geom(ui: &mut egui::Ui, p: &Palette, trail_w: f32) -> RowGeom {
+    let w = ui.available_width();
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, ROW_H), Sense::click());
+    if resp.is_pointer_button_down_on() {
+        ui.painter().rect_filled(rect, 0.0, with_alpha(p.chip_fill, 0.85));
+    } else if resp.hovered() {
+        ui.painter().rect_filled(rect, 0.0, with_alpha(p.card_fill, 0.7));
+    }
+    let icon = Rect::from_min_size(
+        Pos2::new(rect.left() + ROW_PAD, rect.center().y - ICON / 2.0),
+        Vec2::splat(ICON),
+    );
+    let text_x = icon.right() + 12.0;
+    let trail = Rect::from_min_size(
+        Pos2::new(rect.right() - ROW_PAD - trail_w, rect.center().y - 16.0),
+        Vec2::new(trail_w, 32.0),
+    );
+    let text_w = (trail.left() - 10.0 - text_x).max(48.0);
+    RowGeom {
+        rect,
+        resp,
+        icon,
+        text_x,
+        text_w,
+        trail,
+    }
+}
+
+/// 行左侧：图标方块 + 标题（可选副标题）。
+fn row_lead(
+    ui: &egui::Ui,
+    p: &Palette,
+    g: &RowGeom,
+    icon: Icon,
+    tint: Color32,
+    title: &str,
+    subtitle: &str,
+    title_col: Color32,
+) {
+    let pa = ui.painter().with_clip_rect(g.rect);
+    pa.rect_filled(
+        g.icon,
+        (p.card_radius - 6.0).max(6.0),
+        with_alpha(tint, 0.16),
+    );
+    draw_icon(&pa, g.icon.center(), icon, tint);
+    let cy = g.rect.center().y;
+    let tg = pa.layout(
+        title.to_string(),
+        FontId::proportional(FS_ITEM),
+        title_col,
+        g.text_w,
+    );
+    let th = tg.size().y;
+    let ty = if subtitle.is_empty() {
+        cy - th / 2.0
+    } else {
+        cy - 9.0 - th / 2.0
+    };
+    pa.galley(Pos2::new(g.text_x, ty), tg, title_col);
+    if !subtitle.is_empty() {
+        let sg = pa.layout(
+            subtitle.to_string(),
+            FontId::proportional(FS_CAPTION),
+            p.dim,
+            g.text_w,
+        );
+        pa.galley(Pos2::new(g.text_x, cy + 8.0), sg, p.dim);
+    }
+}
+
+/// 右侧勾选标记。
+fn row_check(pa: &egui::Painter, p: &Palette, c: Pos2, on: bool) {
+    if on {
+        pa.circle_filled(c, 8.0, with_alpha(p.accent, 0.22));
+        pa.circle_stroke(c, 9.0, Stroke::new(1.6_f32, p.gold));
+        pa.line_segment(
+            [Pos2::new(c.x - 3.6, c.y + 0.1), Pos2::new(c.x - 1.0, c.y + 3.0)],
+            Stroke::new(1.8_f32, p.gold),
+        );
+        pa.line_segment(
+            [Pos2::new(c.x - 1.0, c.y + 3.0), Pos2::new(c.x + 3.8, c.y - 3.0)],
+            Stroke::new(1.8_f32, p.gold),
+        );
+    } else {
+        pa.circle_stroke(c, 9.0, Stroke::new(1.2_f32, with_alpha(p.card_stroke, 2.2)));
+    }
+}
+
+/// 单选行（图标 + 标题/副标题 + 右侧勾选）。
+fn radio_row(
+    ui: &mut egui::Ui,
+    p: &Palette,
+    icon: Icon,
+    tint: Color32,
+    title: &str,
+    subtitle: &str,
+    on: bool,
+) -> bool {
+    let g = row_geom(ui, p, 26.0);
+    row_lead(
+        ui,
+        p,
+        &g,
+        icon,
+        if on { tint } else { with_alpha(tint, 0.55) },
+        title,
+        subtitle,
+        if on { p.gold } else { p.fg },
+    );
+    let pa = ui.painter().with_clip_rect(g.rect);
+    row_check(&pa, p, g.trail.center(), on);
+    g.resp.clicked()
+}
+
+/// 开关行。
+fn switch_row(
+    ui: &mut egui::Ui,
+    p: &Palette,
+    salt: &str,
+    icon: Icon,
+    tint: Color32,
+    title: &str,
+    subtitle: &str,
+    on: bool,
+) -> bool {
+    let g = row_geom(ui, p, 46.0);
+    row_lead(ui, p, &g, icon, tint, title, subtitle, p.fg);
+    let t = ui
+        .ctx()
+        .animate_bool_with_time(egui::Id::new(("srow", salt)), on, 0.18);
+    let pa = ui.painter().with_clip_rect(g.rect);
+    let sw = Rect::from_center_size(g.trail.center(), Vec2::new(46.0, 26.0));
+    paint_switch(&pa, p, t, sw);
+    g.resp.clicked()
+}
+
+/// 跳转行（右侧可带值 + 箭头）。
+fn nav_row(
+    ui: &mut egui::Ui,
+    p: &Palette,
+    icon: Icon,
+    tint: Color32,
+    title: &str,
+    subtitle: &str,
+    value: &str,
+) -> bool {
+    let g = row_geom(ui, p, 86.0);
+    row_lead(ui, p, &g, icon, tint, title, subtitle, p.fg);
+    let pa = ui.painter().with_clip_rect(g.rect);
+    let cy = g.rect.center().y;
+    let cx = g.rect.right() - ROW_PAD - 4.0;
+    let st = Stroke::new(1.7_f32, p.dim);
+    pa.line_segment([Pos2::new(cx - 1.0, cy - 4.5), Pos2::new(cx + 3.0, cy)], st);
+    pa.line_segment([Pos2::new(cx + 3.0, cy), Pos2::new(cx - 1.0, cy + 4.5)], st);
+    if !value.is_empty() {
+        pa.text(
+            Pos2::new(cx - 9.0, cy),
+            Align2::RIGHT_CENTER,
+            value,
+            FontId::proportional(FS_CAPTION),
+            p.dim,
+        );
+    }
+    g.resp.clicked()
+}
+
+/// 分段选择行（右侧滑块式分段器）。返回被选中的新索引。
+fn seg_row(
+    ui: &mut egui::Ui,
+    p: &Palette,
+    salt: &str,
+    icon: Icon,
+    tint: Color32,
+    title: &str,
+    options: &[&str],
+    sel: usize,
+) -> Option<usize> {
+    let g = row_geom(ui, p, 112.0);
+    row_lead(ui, p, &g, icon, tint, title, "", p.fg);
+    let t = ui.ctx().animate_value_with_time(
+        egui::Id::new(("segrow", salt)),
+        sel as f32,
+        0.16,
+    );
+    let pa = ui.painter().with_clip_rect(g.rect);
+    let r = g.trail.height() / 2.0;
+    pa.rect_filled(g.trail, r, with_alpha(p.track, 0.5));
+    let n = options.len().max(1) as f32;
+    let seg = g.trail.width() / n;
+    let knob = Rect::from_min_size(
+        Pos2::new(g.trail.left() + seg * t + 2.0, g.trail.top() + 2.0),
+        Vec2::new((seg - 4.0).max(8.0), g.trail.height() - 4.0),
+    );
+    let kr = (r - 2.0).max(2.0);
+    pa.rect_filled(knob, kr, p.accent_soft);
+    pa.rect_stroke(
+        knob,
+        kr,
+        Stroke::new(1.0_f32, with_alpha(p.gold, 0.65)),
+        egui::StrokeKind::Inside,
+    );
+    for (i, o) in options.iter().enumerate() {
+        let col = if i == sel { p.gold } else { p.dim };
+        pa.text(
+            Pos2::new(g.trail.left() + seg * (i as f32 + 0.5), g.trail.center().y),
+            Align2::CENTER_CENTER,
+            *o,
+            FontId::proportional(FS_CAPTION),
+            col,
+        );
+    }
+    if g.resp.clicked() {
+        if let Some(pos) = g.resp.interact_pointer_pos() {
+            if g.trail.expand(6.0).contains(pos) {
+                let i = ((pos.x - g.trail.left()) / seg) as usize;
+                return Some(i.min(options.len().saturating_sub(1)));
+            }
+        }
+    }
+    None
+}
+
 fn settings(app: &mut DawnGlowApp, ui: &mut egui::Ui) {
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
             let p = app.p;
-            ui.spacing_mut().item_spacing.y = p.gap;
+            ui.spacing_mut().item_spacing.y = 0.0;
             ui.add_space(SP_XS);
 
             if header(ui, &p, "设置", None, "← 返回") {
                 app.screen = Screen::Forecast;
             }
+            ui.add_space(p.gap);
 
-            // —— 字体（自定义，不内置）——
-            card(ui, &p, |ui| {
-                let w = ui.available_width();
-                wrapped(ui, w, "字体", FS_SECTION, p.fg);
+            // —— 外观 ——
+            group_label(ui, &p, "外观");
+            group_card(ui, &p, |ui| {
                 let cur = app.font_file.clone().unwrap_or_else(|| "系统默认".into());
-                wrapped(ui, w, &format!("当前：{cur}"), FS_CAPTION, p.dim);
-                ui.add_space(SP_MD);
-                if wide_button(ui, &p, "选择字体") {
+                if nav_row(ui, &p, Icon::Text, p.gold, "字体", &format!("当前：{cur}"), "") {
                     app.screen = Screen::Font;
                 }
             });
+            ui.add_space(p.gap);
 
-            // —— 预报模式 ——
-            card(ui, &p, |ui| {
-                let w = ui.available_width();
-                wrapped(ui, w, "预报模式", FS_SECTION, p.fg);
-                ui.add_space(SP_XS);
+            // —— 数据 ——
+            group_label(ui, &p, "数据");
+            group_card(ui, &p, |ui| {
                 let mut picked = None;
-                for m in ModelMode::ALL {
-                    if option_row(ui, &p, m.name(), m.desc(), m == app.model_mode) {
-                        picked = Some(m);
+                for (i, m) in ModelMode::ALL.iter().enumerate() {
+                    if i > 0 {
+                        divider(ui, &p);
                     }
-                    ui.add_space(SP_SM);
+                    if radio_row(
+                        ui,
+                        &p,
+                        Icon::Model,
+                        p.accent,
+                        m.name(),
+                        m.short_desc(),
+                        *m == app.model_mode,
+                    ) {
+                        picked = Some(*m);
+                    }
                 }
                 if let Some(m) = picked {
                     let ctx = ui.ctx().clone();
                     app.set_model_mode(m, &ctx);
                 }
             });
+            ui.add_space(p.gap);
 
             // —— 地图 ——
-            card(ui, &p, |ui| {
-                let w = ui.available_width();
-                wrapped(ui, w, "地图底图", FS_SECTION, p.fg);
-                ui.add_space(SP_XS);
+            group_label(ui, &p, "地图");
+            group_card(ui, &p, |ui| {
                 let mut picked = None;
-                for s in MapSource::ALL {
-                    if option_row(ui, &p, s.name(), s.desc(), s == app.map.source) {
-                        picked = Some(s);
+                for (i, s) in MapSource::ALL.iter().enumerate() {
+                    if i > 0 {
+                        divider(ui, &p);
                     }
-                    ui.add_space(SP_SM);
+                    if radio_row(ui, &p, Icon::Map, p.dawn, s.name(), "", *s == app.map.source) {
+                        picked = Some(*s);
+                    }
                 }
                 if let Some(s) = picked {
                     app.set_map_source(s);
                 }
             });
+            ui.add_space(p.gap);
 
             // —— 显示 ——
-            card(ui, &p, |ui| {
-                if let Some(i) = choice_row(
+            group_label(ui, &p, "显示");
+            group_card(ui, &p, |ui| {
+                if let Some(i) = seg_row(
                     ui,
                     &p,
-                    "地点名称显示",
-                    "精简只显示第一段；完整名称较长时自动换行",
+                    "compact",
+                    Icon::Display,
+                    p.dusk,
+                    "地点名称",
                     &["精简", "完整"],
                     if app.compact_name { 0 } else { 1 },
                 ) {
                     app.compact_name = i == 0;
                     app.save_config();
                 }
-                ui.add_space(SP_MD);
-                if let Some(i) = choice_row(
+                divider(ui, &p);
+                if let Some(i) = seg_row(
                     ui,
                     &p,
+                    "defkind",
+                    Icon::Display,
+                    p.dusk,
                     "默认事件",
-                    "打开时先看朝霞还是晚霞",
                     &["朝霞", "晚霞"],
                     if app.default_sunrise { 0 } else { 1 },
                 ) {
@@ -1367,63 +1736,79 @@ fn settings(app: &mut DawnGlowApp, ui: &mut egui::Ui) {
                     };
                     app.save_config();
                 }
-                ui.add_space(SP_MD);
-                let nf = toggle_row(
+                divider(ui, &p);
+                if switch_row(
                     ui,
                     &p,
-                    "评分因子默认展开",
-                    "进入时默认展示各因子明细",
                     "factors",
+                    Icon::Model,
+                    p.accent,
+                    "评分因子默认展开",
+                    "进入时默认展示明细",
                     app.show_factors,
-                );
-                if nf != app.show_factors {
-                    app.show_factors = nf;
+                ) {
+                    app.show_factors = !app.show_factors;
                     app.save_config();
                 }
-                ui.add_space(SP_MD);
-                let na = toggle_row(
+                divider(ui, &p);
+                if switch_row(
                     ui,
                     &p,
-                    "显示数据来源署名",
-                    "页脚显示数据来源与地图署名",
                     "attrib",
+                    Icon::Info,
+                    p.gold,
+                    "显示数据来源署名",
+                    "页脚显示来源与地图",
                     app.show_attribution,
-                );
-                if na != app.show_attribution {
-                    app.show_attribution = na;
+                ) {
+                    app.show_attribution = !app.show_attribution;
                     app.save_config();
                 }
             });
+            ui.add_space(p.gap);
 
-            // —— 关于（并入设置）——
-            card(ui, &p, |ui| {
-                let w = ui.available_width();
-                wrapped(ui, w, "关于", FS_SECTION, p.gold);
-                let lines = [
-                    ("数据来源", "Open-Meteo 聚合：NCEP GFS、ECMWF IFS、Copernicus CAMS"),
-                    ("预报要素", "日出/日落时间、火烧云鲜艳度、气溶胶 AOD、分层云量"),
-                    ("评分模型", "云型配置 / 能见度 / 气溶胶 / 湿度 / 降水 多因子加权"),
-                    ("许可", "数据 CC BY 4.0；地图 © OpenStreetMap contributors / © CARTO"),
+            // —— 关于 ——
+            group_label(ui, &p, "关于");
+            group_card(ui, &p, |ui| {
+                let items = [
+                    ("数据来源", "Open-Meteo：NCEP GFS、ECMWF IFS、CAMS"),
+                    ("预报要素", "日出日落时间、火烧云鲜艳度、气溶胶 AOD"),
+                    ("评分模型", "云型 / 通透度 / 气溶胶 / 湿度 / 降水 连续加权"),
+                    ("许可", "数据 CC BY 4.0；地图 © OpenStreetMap / © CARTO"),
                 ];
-                for (k, v) in lines {
-                    ui.add_space(SP_XS);
-                    wrapped(ui, w, k, FS_BODY, p.fg);
-                    wrapped(ui, w, v, FS_CAPTION, p.dim);
+                for (i, (k, v)) in items.iter().enumerate() {
+                    if i > 0 {
+                        divider(ui, &p);
+                    }
+                    pad_block(ui, |ui| {
+                        ui.add_space(SP_MD);
+                        let w = ui.available_width();
+                        wrapped(ui, w, k, FS_BODY, p.fg);
+                        wrapped(ui, w, v, FS_CAPTION, p.dim);
+                        ui.add_space(SP_MD);
+                    });
                 }
-                ui.add_space(SP_SM);
-                wrapped(
+                divider(ui, &p);
+                pad_block(ui, |ui| {
+                    ui.add_space(SP_MD);
+                    let w = ui.available_width();
+                    wrapped(ui, w, "预报本质为概率性参考，48 小时以外误差较大，建议临近再看。", FS_CAPTION, p.dim);
+                    ui.add_space(SP_MD);
+                });
+                divider(ui, &p);
+                if nav_row(
                     ui,
-                    w,
-                    "预报本质为概率性参考，>48 小时误差较大，建议当天临近再确认。",
-                    FS_CAPTION,
-                    p.dim,
-                );
-                ui.add_space(SP_MD);
-                if pill(ui, &p, "版本信息 · 检查更新", true) {
+                    &p,
+                    Icon::Tag,
+                    p.gold,
+                    "版本信息 · 检查更新",
+                    "",
+                    env!("CARGO_PKG_VERSION"),
+                ) {
                     app.screen = Screen::Version;
                 }
             });
-            ui.add_space(SP_MD);
+            ui.add_space(p.gap);
         });
 }
 
@@ -1465,49 +1850,12 @@ fn option_row(ui: &mut egui::Ui, p: &Palette, name: &str, desc: &str, on: bool) 
     resp.clicked()
 }
 
-/// 设置项：标题 + 说明在上，等宽选项按钮在下（返回新选项索引）。
-fn choice_row(
-    ui: &mut egui::Ui,
-    p: &Palette,
-    title: &str,
-    desc: &str,
-    options: &[&str],
-    sel: usize,
-) -> Option<usize> {
-    let mut picked = None;
-    let w = ui.available_width();
-    wrapped(ui, w, title, FS_SECTION, p.fg);
-    wrapped(ui, w, desc, FS_CAPTION, p.dim);
-    ui.add_space(6.0);
-    let n = options.len() as f32;
-    let gap = 8.0;
-    let bw = ((w - gap * (n - 1.0)) / n).max(46.0);
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = gap;
-        for (i, opt) in options.iter().enumerate() {
-            let on = i == sel;
-            let fill = if on { p.accent_soft } else { p.card_fill };
-            let txt = if on { p.gold } else { p.dim };
-            let b = egui::Button::new(RichText::new(*opt).size(FS_BODY).color(txt)).fill(fill);
-            if ui.add_sized([bw, H_CHIP], b).clicked() {
-                picked = Some(i);
-            }
-        }
-    });
-    picked
-}
-
-/// 滑动开关（带滑块动画），返回是否被点击。
-fn switch(ui: &mut egui::Ui, p: &Palette, salt: &str, on: bool) -> bool {
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(46.0, 26.0), Sense::click());
-    let t = ui
-        .ctx()
-        .animate_bool_with_time(egui::Id::new(("switch", salt)), on, 0.18);
-    let painter = ui.painter();
+/// 开关的绘制（供设置行复用）。
+fn paint_switch(pa: &egui::Painter, p: &Palette, t: f32, rect: Rect) {
     let r = rect.height() / 2.0;
-    painter.rect_filled(rect, r, lerp_color(p.track, p.accent, t));
+    pa.rect_filled(rect, r, lerp_color(p.track, p.accent, t));
     if p.card_stroke != Color32::TRANSPARENT {
-        painter.rect_stroke(
+        pa.rect_stroke(
             rect,
             r,
             Stroke::new(1.0_f32, with_alpha(p.card_stroke, 0.6)),
@@ -1516,38 +1864,7 @@ fn switch(ui: &mut egui::Ui, p: &Palette, salt: &str, on: bool) -> bool {
     }
     let knob_r = r - 3.0;
     let x = rect.left() + r + (rect.width() - 2.0 * r) * t;
-    painter.circle_filled(Pos2::new(x, rect.center().y), knob_r, Color32::WHITE);
-    resp.clicked()
-}
-
-/// 开关设置行，返回新状态。
-fn toggle_row(
-    ui: &mut egui::Ui,
-    p: &Palette,
-    title: &str,
-    desc: &str,
-    salt: &str,
-    on: bool,
-) -> bool {
-    let mut toggled = false;
-    ui.horizontal(|ui| {
-        let text_w = (ui.available_width() - 62.0).max(80.0);
-        ui.vertical(|ui| {
-            ui.set_max_width(text_w);
-            wrapped(ui, text_w, title, FS_SECTION, p.fg);
-            wrapped(ui, text_w, desc, FS_CAPTION, p.dim);
-        });
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if switch(ui, p, salt, on) {
-                toggled = true;
-            }
-        });
-    });
-    if toggled {
-        !on
-    } else {
-        on
-    }
+    pa.circle_filled(Pos2::new(x, rect.center().y), knob_r, Color32::WHITE);
 }
 
 // ---------- 版本页 ----------

@@ -60,6 +60,15 @@ impl ModelMode {
         }
     }
 
+    /// 设置页行内用的短说明（约 10 字以内）。
+    pub fn short_desc(self) -> &'static str {
+        match self {
+            ModelMode::Blend => "8 模式中位数 · 附概率",
+            ModelMode::Gfs => "单模式，刷新更一致",
+            ModelMode::Ecmwf => "无 visibility，不扣霾",
+        }
+    }
+
     pub fn models(self) -> &'static [&'static str] {
         match self {
             ModelMode::Blend => &MODELS_BLEND,
