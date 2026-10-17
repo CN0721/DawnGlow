@@ -1053,19 +1053,12 @@ fn map(app: &mut DawnGlowApp, ui: &mut egui::Ui, ctx: &egui::Context) {
 
     // 搜索
     card(ui, &p, |ui| {
-        ui.horizontal(|ui| {
-            let btn_w = 72.0;
-            let edit_w = (ui.available_width() - btn_w - 8.0).max(80.0);
-            let edit = egui::TextEdit::singleline(&mut app.search_query)
-                .hint_text("搜索地名，如 上海")
-                .desired_width(edit_w);
-            let resp = ui.add_sized([edit_w, 30.0], edit);
-            let go = pill(ui, &p, "搜索", true)
-                || (resp.lost_focus() && ctx.input(|i| i.key_pressed(egui::Key::Enter)));
-            if go {
-                app.start_search(ctx);
-            }
-        });
+        let (resp, submit) =
+            search_field(ui, &p, "map", "搜索地名，如 上海", &mut app.search_query, true);
+        let go = submit || (resp.lost_focus() && ctx.input(|i| i.key_pressed(egui::Key::Enter)));
+        if go {
+            app.start_search(ctx);
+        }
         if !app.search_results.is_empty() {
             let mut chosen: Option<crate::model::Location> = None;
             let w = ui.available_width();
@@ -1632,6 +1625,107 @@ fn seg_row(
     None
 }
 
+/// 输入框外观：圆角底 + 细描边 + 内边距，文字仍交给 egui TextEdit。
+/// `lead` / `trail` 是左右内侧留给图标、按钮的宽度。
+fn input_row(
+    ui: &mut egui::Ui,
+    p: &Palette,
+    hint: &str,
+    text: &mut String,
+    lead: i8,
+    trail: i8,
+) -> Response {
+    let w = ui.available_width();
+    ui.scope(|ui| {
+        let v = &mut ui.style_mut().visuals;
+        // 比卡片更深一点，读起来是「凹进去的输入区」
+        v.extreme_bg_color = Color32::from_rgba_unmultiplied(0, 0, 0, 72);
+        v.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, p.card_stroke);
+        v.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, p.chip_stroke);
+        v.widgets.active.bg_stroke = Stroke::new(1.0_f32, p.gold);
+        v.selection.bg_fill = p.accent_soft;
+        ui.add_sized(
+            [w, 40.0],
+            egui::TextEdit::singleline(text).hint_text(hint).margin(egui::Margin {
+                left: lead,
+                right: trail,
+                top: 8,
+                bottom: 8,
+            }),
+        )
+    })
+    .inner
+}
+
+/// 搜索框：自绘放大镜 / 清空 / 提交按钮，文本编辑仍用 egui TextEdit
+/// （不自己处理输入法与光标）。返回 (编辑器响应, 是否点了搜索)。
+fn search_field(
+    ui: &mut egui::Ui,
+    p: &Palette,
+    salt: &str,
+    hint: &str,
+    text: &mut String,
+    with_submit: bool,
+) -> (Response, bool) {
+    let right_pad = if with_submit { 64 } else { 36 };
+    let resp = input_row(ui, p, hint, text, 36, right_pad);
+
+    let r = resp.rect;
+    let pa = ui.painter().with_clip_rect(r);
+    let icon_col = if resp.has_focus() { p.gold } else { p.dim };
+    let c = Pos2::new(r.left() + 20.0, r.center().y);
+    pa.circle_stroke(
+        Pos2::new(c.x - 1.0, c.y - 1.0),
+        5.0,
+        Stroke::new(1.5_f32, icon_col),
+    );
+    pa.line_segment(
+        [Pos2::new(c.x + 2.8, c.y + 2.8), Pos2::new(c.x + 6.2, c.y + 6.2)],
+        Stroke::new(1.5_f32, icon_col),
+    );
+
+    let mut submitted = false;
+    if with_submit {
+        let chip = Rect::from_center_size(
+            Pos2::new(r.right() - 34.0, r.center().y),
+            Vec2::new(52.0, 28.0),
+        );
+        let hit = ui.interact(chip, egui::Id::new(("searchgo", salt)), Sense::click());
+        let (fill, col) = if hit.is_pointer_button_down_on() {
+            (with_alpha(p.accent, 0.35), p.fg)
+        } else {
+            (p.accent_soft, p.gold)
+        };
+        pa.rect_filled(chip, 14.0, fill);
+        pa.text(
+            chip.center(),
+            Align2::CENTER_CENTER,
+            "搜索",
+            FontId::proportional(FS_CAPTION),
+            col,
+        );
+        submitted = hit.clicked();
+    } else if !text.is_empty() {
+        let cx = Pos2::new(r.right() - 20.0, r.center().y);
+        let cr = Rect::from_center_size(cx, Vec2::splat(20.0));
+        let hit = ui.interact(cr, egui::Id::new(("searchclear", salt)), Sense::click());
+        let col = if hit.hovered() { p.fg } else { p.dim };
+        let st = Stroke::new(1.5_f32, col);
+        pa.line_segment(
+            [cx + Vec2::new(-4.0, -4.0), cx + Vec2::new(4.0, 4.0)],
+            st,
+        );
+        pa.line_segment(
+            [cx + Vec2::new(-4.0, 4.0), cx + Vec2::new(4.0, -4.0)],
+            st,
+        );
+        if hit.clicked() {
+            text.clear();
+        }
+    }
+    (resp, submitted)
+}
+
 fn settings(app: &mut DawnGlowApp, ui: &mut egui::Ui) {
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
@@ -2094,11 +2188,7 @@ fn font_screen(app: &mut DawnGlowApp, ui: &mut egui::Ui) {
                     p.dim,
                 );
                 ui.add_space(SP_SM);
-                ui.add(
-                    egui::TextEdit::singleline(&mut app.font_query)
-                        .hint_text("搜索字体")
-                        .desired_width(w),
-                );
+                search_field(ui, &p, "font", "搜索字体", &mut app.font_query, false);
                 if !app.font_dl_msg.is_empty() {
                     ui.add_space(SP_XS);
                     wrapped(ui, w, &app.font_dl_msg, FS_CAPTION, p.gold);
@@ -2220,11 +2310,7 @@ fn font_screen(app: &mut DawnGlowApp, ui: &mut egui::Ui) {
                 wrapped(ui, w, "或填入字体文件绝对路径", FS_SECTION, p.fg);
                 ui.add_space(SP_SM);
                 let mut path = app.font_path_input.clone();
-                ui.add(
-                    egui::TextEdit::singleline(&mut path)
-                        .hint_text("/sdcard/Download/xxx.ttf")
-                        .desired_width(w),
-                );
+                input_row(ui, &p, "/sdcard/Download/xxx.ttf", &mut path, 12, 12);
                 ui.add_space(SP_SM);
                 if wide_button(ui, &p, "使用该文件") && !path.trim().is_empty() {
                     picked = Some(Some(path.trim().to_string()));
@@ -2236,10 +2322,13 @@ fn font_screen(app: &mut DawnGlowApp, ui: &mut egui::Ui) {
                 let w = ui.available_width();
                 wrapped(ui, w, "或填入字体下载链接", FS_SECTION, p.fg);
                 ui.add_space(SP_SM);
-                ui.add(
-                    egui::TextEdit::singleline(&mut app.font_url_input)
-                        .hint_text("https://…/xxx.ttf 或 xxx.zip")
-                        .desired_width(w),
+                input_row(
+                    ui,
+                    &p,
+                    "https://…/xxx.ttf 或 xxx.zip",
+                    &mut app.font_url_input,
+                    12,
+                    12,
                 );
                 let url = app.font_url_input.trim().to_string();
                 let stem: String = url
